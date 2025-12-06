@@ -11,7 +11,41 @@ const PORT = process.env.PORT || 5001;
 const MONGO = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/school-db';
 
 mongoose.connect(MONGO, { useNewUrlParser: true, useUnifiedTopology: true })
-  .then(() => console.log('Connected to MongoDB'))
+  .then(async () => {
+    console.log('Connected to MongoDB')
+    try {
+      // Ensure student indexes are in the expected state: remove old global rollNumber index
+      // and create a compound unique index on { class, rollNumber }.
+      const coll = mongoose.connection.db.collection('students');
+      const indexes = await coll.indexes();
+      const hasOldRollIndex = indexes.some(i => i.key && i.key.rollNumber === 1);
+      if (hasOldRollIndex) {
+        // find the exact index name
+        const old = indexes.find(i => i.key && i.key.rollNumber === 1);
+        const oldName = old.name || 'rollNumber_1';
+        try {
+          console.log('Dropping old index:', oldName);
+          await coll.dropIndex(oldName);
+        } catch (e) {
+          console.warn('Failed dropping old rollNumber index:', e.message || e);
+        }
+      }
+
+      // Create compound index (if not exists)
+      const existsCompound = indexes.some(i => i.key && i.key.class === 1 && i.key.rollNumber === 1);
+      if (!existsCompound) {
+        try {
+          console.log('Creating compound index {class:1, rollNumber:1} unique');
+          await coll.createIndex({ class: 1, rollNumber: 1 }, { unique: true, sparse: true });
+          console.log('Compound index created');
+        } catch (e) {
+          console.warn('Failed creating compound index:', e.message || e);
+        }
+      }
+    } catch (err) {
+      console.warn('Index check/create error:', err.message || err);
+    }
+  })
   .catch(err => console.error('Mongo connection error', err));
 
 app.get('/', (req, res) => res.json({ message: 'School API running' }));

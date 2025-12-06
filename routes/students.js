@@ -9,8 +9,10 @@ const auth = require('../middleware/auth');
 // List students (admin-protected)
 router.get('/', auth, async (req, res) => {
   try {
-    // populate class so admin UI can show class.name instead of raw id
-    const students = await Student.find().sort({ createdAt: -1 }).populate('class', 'name');
+    // populate class and originalClass so admin UI can show names
+    const students = await Student.find().sort({ createdAt: -1 })
+      .populate('class', 'name')
+      .populate('originalClass', 'name');
     res.json(students);
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
@@ -88,7 +90,12 @@ router.post('/', auth, upload.single('profileImage'), async (req, res) => {
     if (!studentData.aadharCard) return res.status(400).json({ message: 'Aadhar Card Number is required' });
 
 
-    const s = new Student({ ...studentData });
+    // set originalClass at creation time if a class was provided
+    const s = new Student({
+      ...studentData,
+      originalClass: studentData.class || undefined,
+      originalClassAssignedAt: studentData.class ? new Date() : undefined
+    });
     try {
       await s.save();
       // QR Generation
@@ -235,6 +242,12 @@ router.put('/:id', auth, upload.single('profileImage'), async (req, res) => {
       }
 
       if (user) await user.save();
+    }
+
+    // If class is being updated and originalClass isn't set, preserve the first assigned class
+    if (update.class && !student.originalClass) {
+      student.originalClass = update.class;
+      student.originalClassAssignedAt = student.originalClassAssignedAt || new Date();
     }
 
     Object.assign(student, update);
