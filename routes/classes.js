@@ -156,6 +156,38 @@ router.post('/promote', auth, async (req, res) => {
   }
 });
 
+// Transfer all students from one class to another (admin only)
+router.post('/transfer', auth, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ message: 'Forbidden' });
+  try {
+    const { sourceClassId, targetClassId } = req.body;
+    if (!sourceClassId || !targetClassId) return res.status(400).json({ message: 'sourceClassId and targetClassId required' });
+    if (sourceClassId === targetClassId) return res.status(400).json({ message: 'Source and target classes must be different' });
+
+    const source = await ClassModel.findById(sourceClassId);
+    const target = await ClassModel.findById(targetClassId);
+    if (!source) return res.status(404).json({ message: 'Source class not found' });
+    if (!target) return res.status(404).json({ message: 'Target class not found' });
+
+    const studentsToMove = source.students || [];
+    if (studentsToMove.length === 0) return res.json({ message: 'No students to move', moved: 0 });
+
+    // 1. Update students to point to new class
+    await Student.updateMany({ _id: { $in: studentsToMove } }, { class: target._id });
+
+    // 2. Add students to target class (avoid duplicates)
+    await ClassModel.findByIdAndUpdate(target._id, { $addToSet: { students: { $each: studentsToMove } } });
+
+    // 3. Clear students from source class
+    await ClassModel.findByIdAndUpdate(source._id, { $set: { students: [] } });
+
+    res.json({ message: `Moved ${studentsToMove.length} students from ${source.name} to ${target.name}`, moved: studentsToMove.length });
+  } catch (err) {
+    console.error('Transfer error:', err);
+    res.status(500).json({ message: 'Transfer failed', error: err.message });
+  }
+});
+
 // Update class: assign teacher, students, and subjects
 router.put('/:id', auth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ message: 'Forbidden' });
