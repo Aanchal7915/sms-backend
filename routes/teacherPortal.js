@@ -1,7 +1,9 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const router = express.Router();
 const Teacher = require('../models/Teacher');
 const Class = require('../models/Class');
+const Student = require('../models/Student');
 const Attendance = require('../models/Attendance');
 const Assignment = require('../models/Assignment');
 const Timetable = require('../models/Timetable');
@@ -176,9 +178,56 @@ router.post('/timetable', auth, async (req, res) => {
 
 router.get('/timetable/:classId', auth, async (req, res) => {
   try {
-    const tt = await Timetable.find({ classId: req.params.classId }).sort({ date: -1, createdAt: -1 });
+    const tt = await Timetable.find({ classId: req.params.classId })
+      .sort({ date: -1, createdAt: -1 })
+      .populate('uploadedBy', 'firstName lastName');
     res.json(tt);
   } catch (err) { res.status(500).json({ message: 'Server error' }); }
+});
+
+// Get detailed records for a specific exam
+router.get('/progress/records', auth, async (req, res) => {
+  try {
+    const { classId, examName, subject, date } = req.query;
+    
+    // Check if parameters are provided
+    if (!classId || !date) {
+      return res.status(400).json({ message: 'Missing required parameters: classId and date' });
+    }
+
+    // Validate classId
+    if (!mongoose.isValidObjectId(classId)) {
+      return res.status(400).json({ message: 'Invalid classId' });
+    }
+
+    // Wrap date parsing
+    let startDate, endDate;
+    try {
+        const dInfo = new Date(date);
+        if (isNaN(dInfo.getTime())) throw new Error("Invalid Date");
+        startDate = new Date(date + 'T00:00:00.000Z');
+        endDate = new Date(date + 'T23:59:59.999Z');
+    } catch (e) {
+        return res.status(400).json({ message: 'Invalid date format provided' });
+    }
+
+    const query = {
+      classId: new mongoose.Types.ObjectId(classId),
+      date: { $gte: startDate, $lte: endDate }
+    };
+    
+    if (examName) query.examName = examName;
+    if (subject) query.subject = subject;
+
+    const records = await Progress.find(query).populate('studentId', 'firstName lastName rollNumber admissionNumber');
+
+    // Debug logs for diagnosis
+    console.log(`Fetch Records: ${examName} | ${subject} | ${date} | classId=${classId}`);
+    res.json(records);
+  } catch (err) {
+    console.error('Records fetch error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
 });
 
 // Student progress: add and list
@@ -261,5 +310,45 @@ router.get('/progress/:studentId', auth, async (req, res) => {
     res.json(records);
   } catch (err) { res.status(500).json({ message: 'Server error' }); }
 });
+
+// Get progress exams summary for a class
+router.get('/progress/summary/:classId', auth, async (req, res) => {
+  try {
+    const { classId } = req.params;
+    const summary = await Progress.aggregate([
+      { $match: { classId: new mongoose.Types.ObjectId(classId) } },
+      {
+        $group: {
+          _id: {
+            examName: "$examName",
+            subject: "$subject",
+            date: { $dateToString: { format: "%Y-%m-%d", date: "$date" } }
+          },
+          count: { $sum: 1 },
+          avgMarks: { $avg: "$marks" },
+          outOf: { $first: "$outOf" }
+        }
+      },
+      { $sort: { "_id.date": -1 } }
+    ]);
+    
+    // Format for frontend
+    const result = summary.map(item => ({
+      examName: item._id.examName,
+      subject: item._id.subject,
+      date: item._id.date,
+      count: item.count,
+      avgMarks: item.avgMarks,
+      outOf: item.outOf
+    }));
+
+    res.json(result);
+  } catch (err) {
+    console.error('Summary error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+
 
 module.exports = router;

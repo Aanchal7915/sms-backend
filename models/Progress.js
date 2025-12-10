@@ -8,8 +8,8 @@ const ProgressSchema = new mongoose.Schema({
   // Structured exam fields
   examName: { type: String },
   subject: { type: String },
-  marks: { type: Number },
-  outOf: { type: Number },
+  marks: { type: mongoose.Schema.Types.Mixed }, // Allow string/number mixed to prevent hydration errors if corrupt data exists
+  outOf: { type: mongoose.Schema.Types.Mixed },
   absent: { type: Boolean, default: false },
   // Keep metrics for backward-compatibility
   metrics: { type: mongoose.Schema.Types.Mixed },

@@ -22,6 +22,7 @@ const StudentSchema = new mongoose.Schema({
   originalClassAssignedAt: { type: Date, required: false },
   reference: { type: String }, // optional
   profileImage: { type: String }, // Cloudinary URL
+  dob: { type: Date },
 
   // QR token fields (optional)
   qrToken: { type: String, required: false },
