@@ -2,8 +2,9 @@ const mongoose = require('mongoose');
 
 const BusSchema = new mongoose.Schema({
   number: { type: String, required: true, unique: true },
-  // reference to route document (if assigned)
-  route: { type: mongoose.Schema.Types.ObjectId, ref: 'Route' },
+  // reference to route documents
+  morningRoute: { type: mongoose.Schema.Types.ObjectId, ref: 'Route' },
+  eveningRoute: { type: mongoose.Schema.Types.ObjectId, ref: 'Route' },
   capacity: { type: Number, default: 20 },
   // assigned driver
   driver: { type: mongoose.Schema.Types.ObjectId, ref: 'Driver', required: false },

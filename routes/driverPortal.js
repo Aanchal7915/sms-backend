@@ -36,9 +36,13 @@ router.get('/me', auth, async (req, res) => {
     if (!driver) return res.status(404).json({ message: 'Driver profile not found' });
     // find assigned buses (driver may be assigned multiple buses)
     const buses = await Bus.find({ driver: driver._id })
-      .populate({ path: 'route', populate: { path: 'stops.students', select: 'firstName lastName rollNumber class' } });
-    // if exactly one bus, include route top-level for convenience
-    res.json({ driver, buses, route: buses && buses.length === 1 ? buses[0].route : null });
+      .populate({ path: 'morningRoute', populate: { path: 'stops.students', select: 'firstName lastName rollNumber class' } })
+      .populate({ path: 'eveningRoute', populate: { path: 'stops.students', select: 'firstName lastName rollNumber class' } });
+    
+    // For backward compatibility (or simplicity if only 1 bus), we can still return 'bus' property if needed,
+    // but the frontend should move to using 'buses'.
+    const bus = buses.length > 0 ? buses[0] : null;
+    res.json({ driver, buses, bus }); // bus is deprecated but kept for safety if frontend expects it immediately
   } catch (err) { console.error('GET /driver/me error:', err); res.status(500).json({ message: 'Server error' }); }
 });
 
@@ -123,22 +127,24 @@ router.get('/attendance/students', auth, async (req, res) => {
     const driver = await Driver.findOne({ userId: req.user.id });
     if (!driver) return res.status(403).json({ message: 'Driver profile not found' });
     // support optional query param busId to select which assigned bus to use
-    const { busId } = req.query;
-    let bus = null;
-    if (busId) {
-      if (!/^[0-9a-fA-F]{24}$/.test(busId)) return res.status(400).json({ message: 'Invalid busId' });
-      bus = await Bus.findOne({ _id: busId, driver: driver._id }).populate({ path: 'route', populate: { path: 'stops.students', select: 'firstName lastName rollNumber class' } });
-      if (!bus) return res.status(404).json({ message: 'No such bus assigned to driver' });
-    } else {
-      // if multiple buses, require explicit busId
-      const buses = await Bus.find({ driver: driver._id }).populate({ path: 'route', populate: { path: 'stops.students', select: 'firstName lastName rollNumber class' } });
-      if (!buses.length) return res.status(404).json({ message: 'No route or students assigned to this driver' });
-      if (buses.length === 1) bus = buses[0];
-      else return res.status(400).json({ message: 'Multiple buses assigned. Supply busId query parameter.' });
-    }
+    const { busId, session } = req.query;
+    const query = { driver: driver._id };
+    if (busId) query._id = busId;
+    
+    // if no busId provided, it might pick any. This is risky with multiple buses but maintains backwards compat if unique.
+    const bus = await Bus.findOne(query)
+      .populate({ path: 'morningRoute', populate: { path: 'stops.students', select: 'firstName lastName rollNumber class' } })
+      .populate({ path: 'eveningRoute', populate: { path: 'stops.students', select: 'firstName lastName rollNumber class' } });
+
+    if (!bus) return res.status(404).json({ message: 'No bus assigned or found' });
+    
+    const sess = session || 'morning';
+    const route = sess === 'evening' ? bus.eveningRoute : bus.morningRoute;
+    
+    if (!route) return res.status(404).json({ message: `No ${sess} route assigned to this bus` });
 
     const students = [];
-    for (const stop of (bus.route.stops || [])) {
+    for (const stop of (route.stops || [])) {
       for (const s of (stop.students || [])) {
         if (!students.find(x => String(x._id) === String(s._id))) students.push(s);
       }
@@ -224,19 +230,13 @@ router.get('/attendance/report', auth, async (req, res) => {
   try {
     const driver = await Driver.findOne({ userId: req.user.id });
     if (!driver) return res.status(403).json({ message: 'Driver profile not found' });
-    const { busId, startDate, endDate, session } = req.query;
-
-    let bus = null;
-    if (busId) {
-      if (!/^[0-9a-fA-F]{24}$/.test(busId)) return res.status(400).json({ message: 'Invalid busId' });
-      bus = await Bus.findOne({ _id: busId, driver: driver._id }).populate({ path: 'route', populate: { path: 'stops.students', select: 'firstName lastName rollNumber' } });
-      if (!bus) return res.status(404).json({ message: 'No such bus assigned to driver' });
-    } else {
-      const buses = await Bus.find({ driver: driver._id }).populate({ path: 'route', populate: { path: 'stops.students', select: 'firstName lastName rollNumber' } });
-      if (!buses.length) return res.status(404).json({ message: 'No bus assigned' });
-      if (buses.length === 1) bus = buses[0];
-      else return res.status(400).json({ message: 'Multiple buses assigned. Supply busId query parameter.' });
-    }
+    const { startDate, endDate, session, busId } = req.query;
+    const busQuery = { driver: driver._id };
+    if (busId) busQuery._id = busId;
+    const bus = await Bus.findOne(busQuery)
+      .populate({ path: 'morningRoute', populate: { path: 'stops.students', select: 'firstName lastName rollNumber' } })
+      .populate({ path: 'eveningRoute', populate: { path: 'stops.students', select: 'firstName lastName rollNumber' } });
+    if (!bus) return res.status(404).json({ message: 'No bus assigned' });
 
     const query = { busId: bus._id };
     if (startDate && endDate) query.date = { $gte: new Date(startDate), $lte: new Date(endDate) };
@@ -244,9 +244,18 @@ router.get('/attendance/report', auth, async (req, res) => {
 
     const records = await BusAttendance.find(query).sort({ date: -1 });
 
-    // build report per student from route students
-    const students = [];
-    for (const stop of (bus.route.stops || [])) for (const s of (stop.students || [])) if (!students.find(x => String(x._id) === String(s._id))) students.push(s);
+    // build report per student from route students (combine both routes if no session specified? or follow session)
+    // If session specified, use that route. If not, maybe use both?
+    // User asked for "morning ka alg evening ka alg".
+    // For report, if session is 'morning', use morningRoute.
+    let students = [];
+    const routesToUse = [];
+    if (!session || session === 'morning') routesToUse.push(bus.morningRoute);
+    if (!session || session === 'evening') routesToUse.push(bus.eveningRoute);
+    
+    for(const r of routesToUse) {
+        if(r) for (const stop of (r.stops || [])) for (const s of (stop.students || [])) if (!students.find(x => String(x._id) === String(s._id))) students.push(s);
+    }
 
     const report = students.map(student => {
       const totalDays = records.length;

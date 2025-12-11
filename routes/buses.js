@@ -13,7 +13,8 @@ router.get('/', auth, async (req, res) => {
   try {
     const buses = await Bus.find().sort({ createdAt: -1 })
       .populate('driver', 'firstName lastName licenseNumber phone')
-      .populate({ path: 'route', populate: { path: 'stops.students', select: 'firstName lastName' } });
+      .populate({ path: 'morningRoute', populate: { path: 'stops.students', select: 'firstName lastName' } })
+      .populate({ path: 'eveningRoute', populate: { path: 'stops.students', select: 'firstName lastName' } });
     res.json(buses);
   } catch (err) { res.status(500).json({ message: 'Server error' }); }
 });
@@ -50,7 +51,8 @@ router.post('/', auth, async (req, res) => {
     await b.save();
     res.json(await Bus.findById(b._id)
       .populate('driver', 'firstName lastName licenseNumber phone')
-      .populate({ path: 'route', populate: { path: 'stops.students', select: 'firstName lastName' } }));
+      .populate({ path: 'morningRoute', populate: { path: 'stops.students', select: 'firstName lastName' } })
+      .populate({ path: 'eveningRoute', populate: { path: 'stops.students', select: 'firstName lastName' } }));
   } catch (err) { res.status(400).json({ message: 'Bad request', error: err.message }); }
 });
 
@@ -59,7 +61,8 @@ router.get('/:id', auth, async (req, res) => {
   try {
     const b = await Bus.findById(req.params.id)
       .populate('driver', 'firstName lastName licenseNumber phone')
-      .populate({ path: 'route', populate: { path: 'stops.students', select: 'firstName lastName' } });
+      .populate({ path: 'morningRoute', populate: { path: 'stops.students', select: 'firstName lastName' } })
+      .populate({ path: 'eveningRoute', populate: { path: 'stops.students', select: 'firstName lastName' } });
     if (!b) return res.status(404).json({ message: 'Not found' });
     res.json(b);
   } catch (err) { res.status(500).json({ message: 'Server error' }); }
@@ -127,9 +130,14 @@ router.get('/:id/attendance/report', auth, async (req, res) => {
 
     const recs = await BusAttendance.find(query).sort({ date: -1 });
     // collect students from bus route
-    const bus = await Bus.findById(id).populate({ path: 'route', populate: { path: 'stops.students', select: 'firstName lastName rollNumber' } });
+    const bus = await Bus.findById(id)
+      .populate({ path: 'morningRoute', populate: { path: 'stops.students', select: 'firstName lastName rollNumber' } })
+      .populate({ path: 'eveningRoute', populate: { path: 'stops.students', select: 'firstName lastName rollNumber' } });
     const students = [];
-    if (bus && bus.route) { for (const stop of (bus.route.stops || [])) for (const s of (stop.students || [])) if (!students.find(x => String(x._id) === String(s._id))) students.push(s); }
+    if (bus) {
+        if (bus.morningRoute) for (const stop of (bus.morningRoute.stops || [])) for (const s of (stop.students || [])) if (!students.find(x => String(x._id) === String(s._id))) students.push(s);
+        if (bus.eveningRoute) for (const stop of (bus.eveningRoute.stops || [])) for (const s of (stop.students || [])) if (!students.find(x => String(x._id) === String(s._id))) students.push(s);
+    }
     const report = students.map(student => {
       // Total potential sessions: unique dates * sessions per day? 
       // Simplified: total count of attendance records found (each record is a session)
@@ -177,7 +185,8 @@ router.put('/:id', auth, async (req, res) => {
 
     const b = await Bus.findByIdAndUpdate(req.params.id, update, { new: true })
       .populate('driver', 'firstName lastName licenseNumber phone')
-      .populate({ path: 'route', populate: { path: 'stops.students', select: 'firstName lastName' } });
+      .populate({ path: 'morningRoute', populate: { path: 'stops.students', select: 'firstName lastName' } })
+      .populate({ path: 'eveningRoute', populate: { path: 'stops.students', select: 'firstName lastName' } });
     if (!b) return res.status(404).json({ message: 'Not found' });
     res.json(b);
   } catch (err) { res.status(400).json({ message: 'Bad request', error: err.message }); }

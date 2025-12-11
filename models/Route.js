@@ -12,6 +12,7 @@ const StopSchema = new mongoose.Schema({
 
 const RouteSchema = new mongoose.Schema({
   name: { type: String, required: true },
+  type: { type: String, enum: ['morning', 'evening'], required: true, default: 'morning' },
   startTime: { type: String, required: true }, // store as HH:MM
   endTime: { type: String }, // optional end time (HH:MM) to form a timeslot
   startLocation: { type: String },

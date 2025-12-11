@@ -25,10 +25,11 @@ function timeToMinutes(t) {
 router.post('/', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'bus-incharge') return res.status(403).json({ message: 'Forbidden' });
   try {
-    const { name, startTime, endTime, startLocation, bus: busId, stops } = req.body;
+    const { name, type, startTime, endTime, startLocation, bus: busId, stops } = req.body;
+    const routeType = type || 'morning';
     if (!name || !startTime) return res.status(400).json({ message: 'name and startTime required' });
 
-    const route = new RouteModel({ name, startTime, endTime: endTime || null, startLocation });
+    const route = new RouteModel({ name, type: routeType, startTime, endTime: endTime || null, startLocation });
 
     // if a bus is assigned, require endTime and validate no overlap
     if (busId) {
@@ -41,12 +42,12 @@ router.post('/', auth, async (req, res) => {
       const s1 = timeToMinutes(startTime)
       const e1 = timeToMinutes(endTime)
       if (s1 === null || e1 === null || e1 <= s1) return res.status(400).json({ message: 'Invalid startTime/endTime range' });
-      const conflicts = await RouteModel.find({ bus: bus._id });
+      const conflicts = await RouteModel.find({ bus: bus._id, type: routeType });
       for (const c of conflicts) {
         if (!c.startTime || !c.endTime) continue
         const s2 = timeToMinutes(c.startTime)
         const e2 = timeToMinutes(c.endTime)
-        if (s1 < e2 && s2 < e1) return res.status(400).json({ message: `Bus already assigned to route '${c.name}' in overlapping timeslot` })
+        if (s1 < e2 && s2 < e1) return res.status(400).json({ message: `Bus already assigned to ${routeType} route '${c.name}' in overlapping timeslot` })
       }
 
       route.bus = bus._id;
@@ -72,7 +73,8 @@ router.post('/', auth, async (req, res) => {
     await route.save();
     // if a bus was assigned, set the bus.route pointer for convenience
     if (route.bus) {
-      try { await Bus.findByIdAndUpdate(route.bus, { route: route._id }) } catch (e) { /* ignore */ }
+      const update = routeType === 'evening' ? { eveningRoute: route._id } : { morningRoute: route._id };
+      try { await Bus.findByIdAndUpdate(route.bus, update) } catch (e) { /* ignore */ }
     }
     const populated = await RouteModel.findById(route._id).populate('bus', 'number').populate('stops.students', 'firstName lastName');
     res.json(populated);
@@ -93,9 +95,11 @@ router.put('/:id', auth, async (req, res) => {
   if (req.user.role !== 'admin' && req.user.role !== 'bus-incharge') return res.status(403).json({ message: 'Forbidden' });
   try {
     const prior = await RouteModel.findById(req.params.id)
-    const { name, startTime, endTime, startLocation, bus: busId, stops } = req.body;
+    const { name, type, startTime, endTime, startLocation, bus: busId, stops } = req.body;
     const update = {};
     if (name) update.name = name;
+    if (type) update.type = type;
+    const routeType = type || prior.type || 'morning';
     if (startTime) update.startTime = startTime;
     if (endTime) update.endTime = endTime;
     if (startLocation) update.startLocation = startLocation;
@@ -111,12 +115,12 @@ router.put('/:id', auth, async (req, res) => {
         const s1 = timeToMinutes(startTime || (await RouteModel.findById(req.params.id)).startTime)
         const e1 = timeToMinutes(endTime || (await RouteModel.findById(req.params.id)).endTime)
         if (s1 === null || e1 === null || e1 <= s1) return res.status(400).json({ message: 'Invalid startTime/endTime range' });
-        const conflicts = await RouteModel.find({ _id: { $ne: req.params.id }, bus: bus._id });
+        const conflicts = await RouteModel.find({ _id: { $ne: req.params.id }, bus: bus._id, type: routeType });
         for (const c of conflicts) {
           if (!c.startTime || !c.endTime) continue
           const s2 = timeToMinutes(c.startTime)
           const e2 = timeToMinutes(c.endTime)
-          if (s1 < e2 && s2 < e1) return res.status(400).json({ message: `Bus already assigned to route '${c.name}' in overlapping timeslot` })
+          if (s1 < e2 && s2 < e1) return res.status(400).json({ message: `Bus already assigned to ${routeType} route '${c.name}' in overlapping timeslot` })
         }
         update.bus = bus._id;
       }
@@ -145,9 +149,13 @@ router.put('/:id', auth, async (req, res) => {
       if (update.bus !== undefined) {
         // unset prior bus.route
         if (prior && prior.bus && (!r.bus || String(prior.bus) !== String(r.bus._id))) {
-          await Bus.findByIdAndUpdate(prior.bus, { $unset: { route: '' } })
+          const unsetUpdate = prior.type === 'evening' ? { $unset: { eveningRoute: '' } } : { $unset: { morningRoute: '' } };
+          await Bus.findByIdAndUpdate(prior.bus, unsetUpdate)
         }
-        if (r.bus) await Bus.findByIdAndUpdate(r.bus._id, { route: r._id })
+        if (r.bus) {
+            const setUpdate = r.type === 'evening' ? { eveningRoute: r._id } : { morningRoute: r._id };
+            await Bus.findByIdAndUpdate(r.bus._id, setUpdate)
+        }
       }
     } catch (e) { /* ignore */ }
     res.json(r);
@@ -160,7 +168,8 @@ router.delete('/:id', auth, async (req, res) => {
   try {
     await RouteModel.findByIdAndDelete(req.params.id);
     // unset route field on any bus that referenced this route
-    await Bus.updateMany({ route: req.params.id }, { $unset: { route: '' } });
+    await Bus.updateMany({ morningRoute: req.params.id }, { $unset: { morningRoute: '' } });
+    await Bus.updateMany({ eveningRoute: req.params.id }, { $unset: { eveningRoute: '' } });
     res.json({ message: 'Deleted' });
   } catch (err) { res.status(500).json({ message: 'Server error' }); }
 });
