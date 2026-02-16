@@ -70,6 +70,7 @@ app.use('/api/admin/finance', require('./routes/finance'));
 app.use('/api/admin/reports', require('./routes/reports'));
 app.use('/api/admin/classes', require('./routes/classes'));
 app.use('/api/admin/notices', require('./routes/notices'));
+app.use('/api/admin/marksheets', require('./routes/marksheets'));
 // Portal-level notices endpoints (for bell/unread/read)
 app.use('/api/notices', require('./routes/portalNotices'));
 app.use('/api/admin/routes', require('./routes/routes'));

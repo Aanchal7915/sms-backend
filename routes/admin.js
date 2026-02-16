@@ -3,6 +3,7 @@ const router = express.Router();
 const User = require('../models/User');
 const bcrypt = require('bcryptjs');
 const auth = require('../middleware/auth');
+const marksheetsRouter = require('./marksheets');
 
 // Admin signup (create first admin account)
 router.post('/signup', async (req, res) => {
@@ -47,5 +48,9 @@ router.post('/create-user', auth, async (req, res) => {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
+
+// Compatibility mount: expose marksheet APIs under /api/admin/marksheets
+// even when only the parent /api/admin router is wired by the runtime.
+router.use('/marksheets', marksheetsRouter);
 
 module.exports = router;

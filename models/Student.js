@@ -23,6 +23,20 @@ const StudentSchema = new mongoose.Schema({
   reference: { type: String }, // optional
   profileImage: { type: String }, // Cloudinary URL
   dob: { type: Date },
+  // Academic and fitness details used by admin/teacher edit flows
+  previousSchool: { type: String },
+  previousClass: { type: String },
+  previousPercentage: { type: String },
+  tcNumber: { type: String },
+  tcDate: { type: Date },
+  lastExamMarks: { type: String },
+  lastExamPercentage: { type: String },
+  achievements: { type: String },
+  height: { type: String },
+  weight: { type: String },
+  bloodGroup: { type: String },
+  dentalRecords: { type: String },
+  bp: { type: String },
 
   // QR token fields (optional)
   qrToken: { type: String, required: false },

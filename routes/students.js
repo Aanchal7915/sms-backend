@@ -60,15 +60,16 @@ router.post('/', auth, upload.single('profileImage'), async (req, res) => {
     const mongoose = require('mongoose')
     const Class = require('../models/Class')
 
-    // Sanitize empty fields
+    // Sanitize unique and date fields to be undefined/null if empty string sent
     if (studentData.class === '' || studentData.class === 'null') delete studentData.class;
     if (!studentData.rollNumber) delete studentData.rollNumber;
     if (!studentData.phone) delete studentData.phone;
     if (!studentData.email) delete studentData.email;
-
-    // New fields sanitization
     if (!studentData.admissionNumber) delete studentData.admissionNumber;
     if (!studentData.aadharCard) delete studentData.aadharCard;
+    if (!studentData.tcDate) delete studentData.tcDate;
+    if (!studentData.dob) delete studentData.dob;
+    if (!studentData.admissionDate) delete studentData.admissionDate;
 
     if (studentData.class && typeof studentData.class === 'string') {
       if (!mongoose.Types.ObjectId.isValid(studentData.class)) {
@@ -203,7 +204,13 @@ router.put('/:id', auth, upload.single('profileImage'), async (req, res) => {
       }
     }
 
-    if (update.class === '' || update.class === 'null') delete update.class;
+    // Sanitize empty fields
+    if (update.class === '' || update.class === 'null') update.class = null;
+    if (update.admissionNumber === '') update.admissionNumber = undefined;
+    if (update.aadharCard === '') update.aadharCard = undefined;
+    if (update.tcDate === '') update.tcDate = null;
+    if (update.dob === '') update.dob = null;
+    if (update.admissionDate === '') update.admissionDate = undefined; // Don't allow clearing required field if possible, or handle via model
 
     const mongoose = require('mongoose')
     const Class = require('../models/Class')
