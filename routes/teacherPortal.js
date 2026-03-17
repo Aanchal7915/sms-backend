@@ -1,0 +1,581 @@
+const express = require('express');
+const mongoose = require('mongoose');
+const router = express.Router();
+const Teacher = require('../models/Teacher');
+const Class = require('../models/Class');
+const Student = require('../models/Student');
+const Attendance = require('../models/Attendance');
+const Assignment = require('../models/Assignment');
+const Timetable = require('../models/Timetable');
+const Progress = require('../models/Progress');
+const Marksheet = require('../models/Marksheet');
+const auth = require('../middleware/auth');
+
+const ALLOWED_STUDENT_DETAIL_FIELDS = [
+  'previousSchool',
+  'previousClass',
+  'previousPercentage',
+  'tcNumber',
+  'tcDate',
+  'lastExamMarks',
+  'lastExamPercentage',
+  'achievements',
+  'height',
+  'weight',
+  'bloodGroup',
+  'dentalRecords',
+  'bp'
+];
+
+async function resolveTeacher(req) {
+  return Teacher.findOne({ userId: req.user.id });
+}
+
+async function resolveTeacherStudentClass(teacherId, studentId) {
+  const student = await Student.findById(studentId).select('_id class');
+  if (!student) return { student: null, classDoc: null };
+
+  const classSelectors = [{ students: student._id }];
+  if (student.class) classSelectors.push({ _id: student.class });
+
+  const classDoc = await Class.findOne({
+    $and: [
+      { $or: classSelectors },
+      {
+        $or: [
+          { classTeacher: teacherId },
+          { 'subjects.teachers': teacherId }
+        ]
+      }
+    ]
+  }).select('_id name');
+
+  return { student, classDoc };
+}
+
+function calculateMarksheetTotals(subjects = []) {
+  const safeSubjects = Array.isArray(subjects) ? subjects : [];
+  const totalMaxMarks = safeSubjects.reduce((sum, s) => sum + Number(s?.maxMarks || 0), 0);
+  const totalObtainedMarks = safeSubjects.reduce((sum, s) => sum + Number(s?.obtainedMarks || 0), 0);
+  const percentage = totalMaxMarks > 0 ? Number(((totalObtainedMarks / totalMaxMarks) * 100).toFixed(2)) : 0;
+  const failedSubject = safeSubjects.find((s) => Number(s?.obtainedMarks || 0) < (Number(s?.maxMarks || 0) * 0.33));
+  return {
+    totalMaxMarks,
+    totalObtainedMarks,
+    percentage,
+    result: failedSubject ? 'Fail' : 'Pass'
+  };
+}
+
+async function normalizeClassLabel(classValue, fallbackClassDoc) {
+  if (typeof classValue === 'string' && classValue.trim()) {
+    const value = classValue.trim();
+    if (mongoose.isValidObjectId(value)) {
+      const cls = await Class.findById(value).select('name');
+      return cls?.name || value;
+    }
+    return value;
+  }
+  return fallbackClassDoc?.name || '';
+}
+
+// Get teacher profile by logged-in user
+router.get('/me', auth, async (req, res) => {
+  try {
+    const teacher = await Teacher.findOne({ userId: req.user.id });
+    if (!teacher) return res.status(404).json({ message: 'Teacher profile not found' });
+    res.json(teacher);
+  } catch (err) { res.status(500).json({ message: 'Server error' }); }
+});
+
+// Get class assigned to this teacher (single class assumed)
+router.get('/assigned-class', auth, async (req, res) => {
+  try {
+    const teacher = await Teacher.findOne({ userId: req.user.id });
+    if (!teacher) return res.status(404).json({ message: 'Teacher not found' });
+
+    // Find classes where this teacher is the designated Class Teacher
+    // include email so teacher UI can display student emails
+    const classes = await Class.find({ classTeacher: teacher._id }).populate('students', 'firstName lastName rollNumber email profileImage admissionNumber fatherName aadharCard');
+    // Return the first class (for compatibility with previous single-class assumption)
+    res.json(classes && classes.length ? classes[0] : {});
+  } catch (err) { res.status(500).json({ message: 'Server error' }); }
+});
+
+// Get classes and subjects this teacher teaches (across classes)
+router.get('/teaching-classes', auth, async (req, res) => {
+  try {
+    const teacher = await Teacher.findOne({ userId: req.user.id });
+    if (!teacher) return res.status(404).json({ message: 'Teacher not found' });
+
+    // Find classes where this teacher appears in any subject.teachers OR is the classTeacher
+    const classes = await Class.find({
+      $or: [
+        { 'subjects.teachers': teacher._id },
+        { 'classTeacher': teacher._id }
+      ]
+    }).select('name subjects classTeacher').populate('subjects.teachers', 'firstName lastName');
+
+    // For each class, filter subjects to only those taught by this teacher
+    const result = classes.map((c) => ({
+      _id: c._id,
+      name: c.name,
+      subjects: (c.subjects || []).filter(s => (s.teachers || []).some(t => String(t._id) === String(teacher._id))).map(s => ({ name: s.name }))
+    }));
+
+    res.json(result);
+  } catch (err) { console.error('GET /teacher/teaching-classes error:', err); res.status(500).json({ message: 'Server error' }); }
+});
+
+// Get attendance for assigned class (optional date range)
+router.get('/assigned-class/attendance', auth, async (req, res) => {
+  try {
+    const teacher = await Teacher.findOne({ userId: req.user.id });
+    if (!teacher) return res.status(404).json({ message: 'Teacher not found' });
+    const classes = await Class.find({ classTeacher: teacher._id });
+    const cls = classes && classes.length ? classes[0] : null;
+    if (!cls) return res.status(404).json({ message: 'Class not assigned' });
+
+    const { startDate, endDate } = req.query;
+    const query = { classId: cls._id };
+    if (startDate && endDate) query.date = { $gte: new Date(startDate), $lte: new Date(endDate) };
+
+    const records = await Attendance.find(query).populate('records.studentId', 'firstName lastName rollNumber');
+    res.json(records);
+  } catch (err) { console.error(err); res.status(500).json({ message: 'Server error' }); }
+});
+
+// Assignments: create for class (teacher)
+router.post('/assignments', auth, async (req, res) => {
+  try {
+    // only teachers can create here
+    if (req.user.role !== 'teacher') return res.status(403).json({ message: 'Forbidden' });
+    const teacher = await Teacher.findOne({ userId: req.user.id });
+    if (!teacher) return res.status(404).json({ message: 'Teacher not found' });
+
+    const { classId, title, description, dueDate, attachments } = req.body;
+    if (!classId || !title) return res.status(400).json({ message: 'classId and title required' });
+
+    const a = new Assignment({ classId, title, description, dueDate, attachments, createdBy: teacher._id });
+    await a.save();
+    res.json(a);
+  } catch (err) { res.status(400).json({ message: 'Bad request', error: err.message }); }
+});
+
+// Update assignment (teacher who created it)
+router.put('/assignments/:id', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'teacher') return res.status(403).json({ message: 'Forbidden' });
+    const teacher = await Teacher.findOne({ userId: req.user.id });
+    if (!teacher) return res.status(404).json({ message: 'Teacher not found' });
+
+    const assignment = await Assignment.findById(req.params.id);
+    if (!assignment) return res.status(404).json({ message: 'Assignment not found' });
+    if (String(assignment.createdBy) !== String(teacher._id)) return res.status(403).json({ message: 'Not allowed' });
+
+    const { title, description, dueDate, attachments } = req.body;
+    if (title !== undefined) assignment.title = title;
+    if (description !== undefined) assignment.description = description;
+    if (dueDate !== undefined) assignment.dueDate = dueDate;
+    if (attachments !== undefined) assignment.attachments = attachments;
+    await assignment.save();
+    res.json(assignment);
+  } catch (err) { console.error('PUT /teacher/assignments/:id error:', err); res.status(400).json({ message: 'Bad request', error: err.message }); }
+});
+
+// Delete assignment (teacher who created it)
+router.delete('/assignments/:id', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'teacher') return res.status(403).json({ message: 'Forbidden' });
+    const teacher = await Teacher.findOne({ userId: req.user.id });
+    if (!teacher) return res.status(404).json({ message: 'Teacher not found' });
+
+    const assignment = await Assignment.findById(req.params.id);
+    if (!assignment) return res.status(404).json({ message: 'Assignment not found' });
+    if (String(assignment.createdBy) !== String(teacher._id)) return res.status(403).json({ message: 'Not allowed' });
+
+    await Assignment.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (err) { console.error('DELETE /teacher/assignments/:id error:', err); res.status(500).json({ message: 'Server error' }); }
+});
+
+// Get assignments for teacher's class(es)
+router.get('/assignments', auth, async (req, res) => {
+  try {
+    const teacher = await Teacher.findOne({ userId: req.user.id });
+    if (!teacher) return res.status(404).json({ message: 'Teacher not found' });
+
+    // Find all classes where this teacher teaches or is class teacher
+    const classes = await Class.find({
+      $or: [
+        { 'subjects.teachers': teacher._id },
+        { 'classTeacher': teacher._id }
+      ]
+    });
+
+    if (!classes.length) return res.json([]);
+    const classIds = classes.map(c => c._id);
+
+    // Sort by createdAt desc
+    const assignments = await Assignment.find({ classId: { $in: classIds } })
+      .sort({ createdAt: -1 })
+      .populate('classId', 'name');
+    res.json(assignments);
+  } catch (err) { console.error(err); res.status(500).json({ message: 'Server error' }); }
+});
+
+// Timetable: upload
+router.post('/timetable', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'teacher') return res.status(403).json({ message: 'Forbidden' });
+    const teacher = await Teacher.findOne({ userId: req.user.id });
+    const { classId, content, imageUrl, date } = req.body;
+
+    if (!classId || (!content && !imageUrl)) return res.status(400).json({ message: 'classId and content or image required' });
+
+    const t = new Timetable({
+      classId,
+      content,
+      imageUrl,
+      date: date || new Date(),
+      uploadedBy: teacher ? teacher._id : undefined
+    });
+    await t.save();
+    res.json(t);
+  } catch (err) { res.status(400).json({ message: 'Bad request', error: err.message }); }
+});
+
+router.get('/timetable/:classId', auth, async (req, res) => {
+  try {
+    const tt = await Timetable.find({ classId: req.params.classId })
+      .sort({ date: -1, createdAt: -1 })
+      .populate('uploadedBy', 'firstName lastName');
+    res.json(tt);
+  } catch (err) { res.status(500).json({ message: 'Server error' }); }
+});
+
+// Update selected student academic/fitness details (teacher for own class only)
+router.put('/student/:studentId/details', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'teacher') return res.status(403).json({ message: 'Forbidden' });
+    const teacher = await resolveTeacher(req);
+    if (!teacher) return res.status(404).json({ message: 'Teacher not found' });
+
+    const { student, classDoc } = await resolveTeacherStudentClass(teacher._id, req.params.studentId);
+    if (!student) return res.status(404).json({ message: 'Student not found' });
+    if (!classDoc) return res.status(403).json({ message: 'Not allowed for this student' });
+
+    const update = {};
+    ALLOWED_STUDENT_DETAIL_FIELDS.forEach((field) => {
+      if (Object.prototype.hasOwnProperty.call(req.body, field)) {
+        // If it's a date field and empty string, set to null
+        if ((field === 'tcDate' || field === 'dob') && req.body[field] === '') {
+          update[field] = null;
+        } else {
+          update[field] = req.body[field];
+        }
+      }
+    });
+
+    const updated = await Student.findByIdAndUpdate(student._id, { $set: update }, { new: true });
+    res.json(updated);
+  } catch (err) {
+    console.error('PUT /teacher/student/:studentId/details error:', err);
+    res.status(400).json({ message: 'Bad request', error: err.message });
+  }
+});
+
+// Get marksheets for a specific student (teacher for own class only)
+router.get('/student/:studentId/marksheets', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'teacher') return res.status(403).json({ message: 'Forbidden' });
+    const teacher = await resolveTeacher(req);
+    if (!teacher) return res.status(404).json({ message: 'Teacher not found' });
+
+    const { student, classDoc } = await resolveTeacherStudentClass(teacher._id, req.params.studentId);
+    if (!student) return res.status(404).json({ message: 'Student not found' });
+    if (!classDoc) return res.status(403).json({ message: 'Not allowed for this student' });
+
+    const marksheets = await Marksheet.find({ studentId: student._id }).sort({ createdAt: -1 });
+    res.json(marksheets);
+  } catch (err) {
+    console.error('GET /teacher/student/:studentId/marksheets error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// Create marksheet (teacher for own class students)
+router.post('/marksheets', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'teacher') return res.status(403).json({ message: 'Forbidden' });
+    const teacher = await resolveTeacher(req);
+    if (!teacher) return res.status(404).json({ message: 'Teacher not found' });
+
+    const { studentId } = req.body;
+    if (!studentId) return res.status(400).json({ message: 'studentId is required' });
+
+    const { student, classDoc } = await resolveTeacherStudentClass(teacher._id, studentId);
+    if (!student) return res.status(404).json({ message: 'Student not found' });
+    if (!classDoc) return res.status(403).json({ message: 'Not allowed for this student' });
+
+    const classLabel = await normalizeClassLabel(req.body.class, classDoc);
+    if (!classLabel) return res.status(400).json({ message: 'class is required' });
+
+    const marksheet = new Marksheet({
+      ...req.body,
+      studentId: student._id,
+      class: classLabel
+    });
+
+    // Filter subjects with no name
+    if (marksheet.subjects && Array.isArray(marksheet.subjects)) {
+      marksheet.subjects = marksheet.subjects.filter(s => s.name && s.name.trim());
+    }
+
+    if (!marksheet.subjects || marksheet.subjects.length === 0) {
+      return res.status(400).json({ message: 'At least one subject with a name is required' });
+    }
+
+    Object.assign(marksheet, calculateMarksheetTotals(marksheet.subjects));
+
+    await marksheet.save();
+    res.json(marksheet);
+  } catch (err) {
+    console.error('POST /teacher/marksheets error:', err);
+    res.status(400).json({ message: 'Bad request', error: err.message });
+  }
+});
+
+// Update marksheet (teacher for own class students)
+router.put('/marksheets/:id', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'teacher') return res.status(403).json({ message: 'Forbidden' });
+    const teacher = await resolveTeacher(req);
+    if (!teacher) return res.status(404).json({ message: 'Teacher not found' });
+
+    const marksheet = await Marksheet.findById(req.params.id);
+    if (!marksheet) return res.status(404).json({ message: 'Marksheet not found' });
+
+    const { classDoc } = await resolveTeacherStudentClass(teacher._id, marksheet.studentId);
+    if (!classDoc) return res.status(403).json({ message: 'Not allowed for this marksheet' });
+
+    const update = { ...req.body };
+    delete update._id;
+    delete update.studentId;
+    delete update.createdAt;
+    delete update.updatedAt;
+    delete update.__v;
+
+    if (Object.prototype.hasOwnProperty.call(update, 'class')) {
+      update.class = await normalizeClassLabel(update.class, classDoc);
+    }
+
+    Object.assign(marksheet, update);
+
+    // Filter subjects with no name
+    if (marksheet.subjects && Array.isArray(marksheet.subjects)) {
+      marksheet.subjects = marksheet.subjects.filter(s => s.name && s.name.trim());
+    }
+
+    if (marksheet.subjects.length === 0) {
+      return res.status(400).json({ message: 'At least one subject with a name is required' });
+    }
+
+    Object.assign(marksheet, calculateMarksheetTotals(marksheet.subjects));
+
+    await marksheet.save();
+    res.json(marksheet);
+  } catch (err) {
+    console.error('PUT /teacher/marksheets/:id error:', err);
+    res.status(400).json({ message: 'Bad request', error: err.message });
+  }
+});
+
+// Delete marksheet (teacher for own class students)
+router.delete('/marksheets/:id', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'teacher') return res.status(403).json({ message: 'Forbidden' });
+    const teacher = await resolveTeacher(req);
+    if (!teacher) return res.status(404).json({ message: 'Teacher not found' });
+
+    const marksheet = await Marksheet.findById(req.params.id);
+    if (!marksheet) return res.status(404).json({ message: 'Marksheet not found' });
+
+    const { classDoc } = await resolveTeacherStudentClass(teacher._id, marksheet.studentId);
+    if (!classDoc) return res.status(403).json({ message: 'Not allowed for this marksheet' });
+
+    await Marksheet.findByIdAndDelete(marksheet._id);
+    res.json({ message: 'Deleted' });
+  } catch (err) {
+    console.error('DELETE /teacher/marksheets/:id error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// Get detailed records for a specific exam
+router.get('/progress/records', auth, async (req, res) => {
+  try {
+    const { classId, examName, subject, date } = req.query;
+
+    // Check if parameters are provided
+    if (!classId || !date) {
+      return res.status(400).json({ message: 'Missing required parameters: classId and date' });
+    }
+
+    // Validate classId
+    if (!mongoose.isValidObjectId(classId)) {
+      return res.status(400).json({ message: 'Invalid classId' });
+    }
+
+    // Wrap date parsing
+    let startDate, endDate;
+    try {
+      const dInfo = new Date(date);
+      if (isNaN(dInfo.getTime())) throw new Error("Invalid Date");
+      startDate = new Date(date + 'T00:00:00.000Z');
+      endDate = new Date(date + 'T23:59:59.999Z');
+    } catch (e) {
+      return res.status(400).json({ message: 'Invalid date format provided' });
+    }
+
+    const query = {
+      classId: new mongoose.Types.ObjectId(classId),
+      date: { $gte: startDate, $lte: endDate }
+    };
+
+    if (examName) query.examName = examName;
+    if (subject) query.subject = subject;
+
+    const records = await Progress.find(query).populate('studentId', 'firstName lastName rollNumber admissionNumber');
+
+    // Debug logs for diagnosis
+    console.log(`Fetch Records: ${examName} | ${subject} | ${date} | classId=${classId}`);
+    res.json(records);
+  } catch (err) {
+    console.error('Records fetch error:', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// Student progress: add and list
+// Student progress: add single
+router.post('/progress', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'teacher') return res.status(403).json({ message: 'Forbidden' });
+    const teacher = await Teacher.findOne({ userId: req.user.id });
+    const { studentId, classId, metrics, remarks, date, examName, subject, marks, outOf } = req.body;
+    if (!studentId || !classId) return res.status(400).json({ message: 'studentId and classId required' });
+
+    // Verify teacher access to class
+    const cls = await Class.findOne({
+      _id: classId,
+      $or: [{ 'subjects.teachers': teacher._id }, { 'classTeacher': teacher._id }]
+    });
+    if (!cls) return res.status(403).json({ message: 'You are not assigned to this class' });
+
+    const p = new Progress({
+      studentId,
+      classId,
+      teacherId: teacher ? teacher._id : undefined,
+      metrics,
+      remarks,
+      date,
+      examName,
+      subject,
+      marks,
+      outOf
+    });
+    await p.save();
+    res.json(p);
+  } catch (err) { res.status(400).json({ message: 'Bad request', error: err.message }); }
+});
+
+// Student progress: bulk add
+router.post('/progress/bulk', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'teacher') return res.status(403).json({ message: 'Forbidden' });
+    const teacher = await Teacher.findOne({ userId: req.user.id });
+    if (!teacher) return res.status(404).json({ message: 'Teacher not found' });
+
+    const { classId, examName, subject, outOf, date, records } = req.body;
+    // records: [{ studentId, marks, remarks }]
+
+    if (!classId || !records || !Array.isArray(records)) return res.status(400).json({ message: 'Invalid data' });
+
+    // Verify teacher access to class
+    const cls = await Class.findOne({
+      _id: classId,
+      $or: [{ 'subjects.teachers': teacher._id }, { 'classTeacher': teacher._id }]
+    });
+    if (!cls) return res.status(403).json({ message: 'You are not assigned to this class' });
+
+    const progressDocs = records.map(r => ({
+      studentId: r.studentId,
+      classId,
+      teacherId: teacher._id,
+      examName,
+      subject,
+      date: date || new Date(),
+      outOf: outOf ? Number(outOf) : undefined,
+      marks: r.marks !== '' ? Number(r.marks) : undefined, // allow empty marks
+      absent: !!r.absent,
+      remarks: r.remarks
+    }));
+
+    // Filter out entries with no marks and no remarks to avoid junk? 
+    // The user might want to record '0' or just remarks.
+    // We will save whatever is sent.
+
+    await Progress.insertMany(progressDocs);
+    res.json({ message: 'Progress records saved', count: progressDocs.length });
+  } catch (err) { res.status(400).json({ message: 'Bad request', error: err.message }); }
+});
+
+router.get('/progress/:studentId', auth, async (req, res) => {
+  try {
+    const records = await Progress.find({ studentId: req.params.studentId }).sort({ date: -1 });
+    res.json(records);
+  } catch (err) { res.status(500).json({ message: 'Server error' }); }
+});
+
+// Get progress exams summary for a class
+router.get('/progress/summary/:classId', auth, async (req, res) => {
+  try {
+    const { classId } = req.params;
+    const summary = await Progress.aggregate([
+      { $match: { classId: new mongoose.Types.ObjectId(classId) } },
+      {
+        $group: {
+          _id: {
+            examName: "$examName",
+            subject: "$subject",
+            date: { $dateToString: { format: "%Y-%m-%d", date: "$date" } }
+          },
+          count: { $sum: 1 },
+          avgMarks: { $avg: "$marks" },
+          outOf: { $first: "$outOf" }
+        }
+      },
+      { $sort: { "_id.date": -1 } }
+    ]);
+
+    // Format for frontend
+    const result = summary.map(item => ({
+      examName: item._id.examName,
+      subject: item._id.subject,
+      date: item._id.date,
+      count: item.count,
+      avgMarks: item.avgMarks,
+      outOf: item.outOf
+    }));
+
+    res.json(result);
+  } catch (err) {
+    console.error('Summary error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+
+
+module.exports = router;
